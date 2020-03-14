@@ -1,0 +1,1153 @@
+---
+title: "Entreprise Telco :  "
+output:
+  rmarkdown::github_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+library("Hmisc")
+library("corrplot")
+library("mice")
+library("vcd")
+library("VIM")
+library("questionr")
+library("car")
+library("dplyr")
+library("alluvial")
+library("caret")
+library('randomForest')
+library("tidyverse")
+library("ggplot2")
+library("rpart")
+library("gbm")
+library("MASS")
+library("rpart.plot")
+library("xgboost")
+library("ROCR")
+library("pROC")
+library("MLmetrics")
+library("FactoMineR")
+library("DiagrammeR")
+library("factoextra")
+library("xgboost")
+setwd("C:/Users/louis/Downloads")
+```
+
+# Introduction 
+
+Le but de ce projet est de déterminer nos potentiels clients Churner. En effet, Telclo est une entreprise de télécomunication proposant un service téléphonique mais aussi d'autres services tels qu' un accès a internet, un service de sauvegarde a disance , une protection des appareils, un support, et autres services... . 
+Le but est de cibler nos clients futurs churners afin de potentiellment d'entamer des démarches afin de les reconquérir (offre promotionnelle,...) ou bien encore de déterminer les raisons de leurs départs afin d'établir peut-être une offre plus adaptée à certains clients. 
+Il n'y a dans nos données pas de dimension temporelle. Nous avons pour ainsi dire pas de dates, on ne travaillera donc pas avec une dimension temporelle mais on aura à disposition l'ancienneté du contrat ("tenure") qui nous sera particulièrement utile dans l'exercice. 
+Par commodité et pour s'adapter aux contraintes imposées, nous augmenterons nos NA afin de pouvoir les remplacer, de plus nous avons transformé certaines variables catégorielles binaires en variables numériques.
+
+Voici la liste des variables mises à disposition: 
+
+#### Customer ID : identifiant du client.
+#### Gender : Sexe du client (M/F).
+#### SeniorCitizen: Client est-il senior (1) ou non (0) ?
+#### Partner : Le client a-t ‘il un partenaire (Yes) ou non (No)?
+#### Dependents: Le client a-t ‘il des personnes à charge ou non ? (Yes, No)
+#### Tenure : Nombre de mois que le client a passé dans la compagnie 
+#### PhoneService: Le client a-t ’il souscrit à un service téléphonique ?  (Yes, No)
+#### MultipleLines: Le client a-t’il plusieurs ligne ? (Yes, No, No phone service)
+#### InternetService: A-t’il souscrit à un abonnement internet ? (DSL, Fiber optic, No)
+#### OnlineSecurity: Le client a-t‘il souscrit au service de sécurité en ligne (Yes, No, No internet service)
+#### OnlineBackup: Le client a-t‘il souscrit au service de sauvegarde en ligne (Yes, No, No internet service)
+#### DeviceProtection: Le client a-t‘il souscrit au service de protection de l’appareil(Yes, No, No internet service)
+#### TechSupport : Le client a-t‘il souscrit au service d’assistance ?(Yes, No, No internet service)
+#### StreamingTV: Service de TV? (Yes, No, No internet service) 
+#### StreamingMovies: Service de film en streaming ?(Yes, No, No internet service)
+#### Contract: Durée de vie du contrat (Month-to-month, One year, Two year)
+#### PaperlessBilling: Facturation en papier  (Yes, No)
+#### PaymentMethod: Le type de paiement choisi (Electronic check, Mailed check, Bank transfer (automatic), Credit card (automatic))
+#### MonthlyCharges: Le montant facturé mensuellement au client 
+#### TotalCharges: Le montant total facturé au client 	
+#### Churn: Le client a-t'il quitté l'entreprise ? (Yes or No)
+
+# Paramètrage des données
+
+## Extraction de la table
+
+```{r cars}
+base=read.csv("Telco_projet.csv",header=TRUE, sep=",",na.strings= "")
+head(base)
+str(base)
+summary(base)
+```
+
+## Transformation variable categorielle en numerique
+
+```{r pressure, echo=FALSE}
+base$Churn=ifelse(base$Churn=='Yes',1,0)
+levels(base$gender)
+levels(base$Partner)
+levels(base$Dependents)
+levels(base$PaperlessBilling)
+base$Partner=ifelse(base$Partner=='Yes',1,0)                             
+base$Dependents=ifelse(base$Dependents=='Yes',1,0) 
+base$PaperlessBilling=ifelse(base$PaperlessBilling=='Yes',1,0) 
+base$gender=ifelse(base$gender=='Female',1,0)
+```
+
+
+## Insertion des NA pour variables numériques 
+
+```{r}
+insert_nas <- function(x) {
+  len <- length(x)
+  n<- sample(1:floor(0.1*len),1)
+  i <- sample(1:len,n)
+  x[i] <- NA
+  x
+}
+
+base[,c('TotalCharges','PaperlessBilling')] <- data.frame(sapply(base[,c('TotalCharges','PaperlessBilling')], insert_nas))
+
+```
+
+## Insertion des NA pour variables qualitatives 
+
+```{r}
+base[,c('StreamingMovies','Contract')] <- data.frame(sapply(base[,c('StreamingMovies','Contract')], insert_nas))
+```
+
+# Churner , Churner ! Qui-est-tu ?
+
+## Analyse graphique univariée
+
+### Proportion de la variable cible
+
+```{r}
+table <- base
+options(repr.plot.width = 6, repr.plot.height = 4)
+table %>% 
+  group_by(Churn) %>% 
+  summarise(Count = n())%>% 
+  mutate(percent = prop.table(Count)*100)%>%
+  ggplot(aes(reorder(Churn, -percent), percent), fill = Churn)+
+  geom_col(fill = c("blue", "red"))+
+  geom_text(aes(label = sprintf("%.2f%%", percent)), hjust = 0.01,vjust = -0.5, size =3)+ 
+  theme_bw()+  
+  xlab("Churn") + 
+  ylab("Percent")+
+  ggtitle("Churn Percent")
+```
+
+On peut observer ici la répartition de Churner dans notre population.
+On voit ainsi qu'on possède plus d'un quart de churner contre trois quart de non churners. 
+On peut donc ici appliquer nos algorithmes assez serainement car il n'y a pas d'oversampling (= trop petite repréentation de la variable ciblée).
+
+### Représentation graphique des variables avec NA
+
+```{r}
+numerik <- Filter(is.numeric,table)
+karacter <- Filter(is.factor,table)
+karacter$'customerID' =NULL
+#describe(karacter)
+```
+
+```{r}
+#Graph variable catégorielle
+par(mfrow=c(3,3))
+for(x in seq(1,length(karacter)))plot(karacter[,x], xlab=names(karacter[x]),
+                                   col=rainbow(16),
+                                   main=names(karacter[x]), horiz=F)
+```
+
+```{r}
+#Graph variable numérique
+par(mfrow=c(3,3))#Pour mettre les 6 histos... sur le meme graph
+for(x in seq(1, length(numerik)))hist(numerik[,x], xlab=names(numerik[x]),
+                                   col=rainbow(10), main=names(numerik[x]))
+```
+
+## Analyse graphique multivariée
+
+### Diagramme alluvial
+
+```{r}
+par(mfrow=c(1,1))
+table2 <- table %>%
+  
+  group_by(Churn, Contract, SeniorCitizen, PaymentMethod, gender ) %>%
+  
+  summarise(N = n()) %>% 
+  
+  ungroup %>%
+  
+  na.omit
+
+alluvial(table2[, c(1:4)],
+         
+         freq=table2$N, border=NA,
+         
+         col=ifelse(table2$Churn == "1", "blue", "red"),
+         
+         cex=0.65,
+         
+         ordering = list(
+           
+           order(table2$Churn, table2$SeniorCitizen=="Yes"),
+           
+           order(table2$gender, table2$SeniorCitizen=="Yes"),
+           
+           NULL,
+           
+           NULL))
+```
+
+Le graphique alluvial permet de voir certaines interactions ou profil type du caractère ciblé. On voit ici un chemin qui se dessine pour un Churner.
+Ici, nous pouvons voir qu'un Churner aura plus de chances d'avoir un contrat month-to-month, qu'il ne sera pas senior et qu'il paiera plutôt par 'electronic check'.
+Cependant, avec ce genre de graph, il faut s'assurer de l'indépendance de chacune des variables utilisées. En effet, on pourrait se demander si un Churn, qui est visiblement majoritairement en contrat mois/mois n'a pas pour seul choix le paiement par 'electronic check'. Il faudra donc vérifier cela afin de pouvoir conjecturer sur une potentielle causalité.
+
+```{r}
+ggplot(table) +
+  geom_bar(aes(x=Contract,fill=as.factor(PaymentMethod)))+
+  ylab("Nombre de clients") +
+  ggtitle("Repartiton du mode de paiement en fonction du type de contrat") + 
+  scale_fill_brewer(palette="Set1") +
+  theme_minimal()         
+
+```
+
+Ce graph valide la tendance des churners vu dans le graph alluvial, en effet , on voit que le contrat month/month a toutes les possibilités de paiement offertes. Il n'y a donc pas de dépendance entre ces variables. Nous pouvons donc valider le profil du Churner vu au dessus.
+
+### Représentation de la part de Churn en fonction de la durée du contrat
+
+```{r}
+ggplot(table) +
+  geom_density(aes(x=tenure,fill=as.factor(Churn)),alpha=0.4)+
+
+  ggtitle("Densité de Churnen fonction de la durée du contrat ")+
+  ylab("Densité de Churner ou non")
+```
+
+### Représentation des sommes payées en fonction du Churn
+
+```{r}
+ggplot(table, aes(y= MonthlyCharges,  fill = as.factor(Churn))) + 
+geom_boxplot()+ 
+theme_bw()+
+ggtitle("Répartion des paiements au mois en fonction du Churn")+
+xlab(" ")
+
+ggplot(table, aes(y= TotalCharges,  fill = as.factor(Churn))) + 
+geom_boxplot()+ 
+theme_bw()+
+ggtitle("Répartion des paiements cumulés en fonction du Churn")+
+xlab(" ")
+
+ggplot(table) +
+  geom_density(aes(x=MonthlyCharges,fill=as.factor(Churn)),alpha=0.4)+
+
+  ggtitle("Densité de Churn en fonction du montant payé au mois ")+
+  ylab("Densité de Churner ou non")
+
+ggplot(data = table, aes(x = tenure, y =MonthlyCharges )) + geom_point() + geom_smooth(method = "lm")
+
+```
+
+Nous avons ici toute une série de graphique mettant en relation le Churn avec les charges réglées.
+D'une part, les boxplots nous montrent l'absence d'oulyers. Même si certaines valeurs dans 'TotalCharges' sont importantes, celles-ci sont expliquées par une forte ancienneté conjugué à un abonnement mensuel élevé. Ces valeurs ne sont donc pas abérentes et ne necessitent donc pas de retraitement.
+SUr le graph de densité, nous pouvons voir que les churners payennent un abonnement mensuel plus important que les nons-churners ce qui pourrait être une raison de Churn. 
+Enfin sur le 4ème graph, on peut voir un fait plutôt étonnant, le prix payé mensuellement ne diminue pas avec l'ancienneté du contrat. Cela pourrait s'expliquer par le fait que les clients possédant un abonnement a option (qui payent donc plus cher), on plus de chances d'avoir une longue ancienneté.
+
+
+### Représentation du Churn en fonction du type de contrat par sexe
+
+```{r}
+ggplot(table) +
+  geom_bar(aes(x=Contract,fill=as.factor(Churn)))+
+  facet_wrap(~gender, ncol = 2, nrow = 1)+
+           
+  ylab("Nombre de clients") +
+
+  ggtitle("Part de Churn H/F par type de contrat") + 
+  
+  scale_fill_brewer(palette="Set1") +
+
+  theme_minimal()         
+
+```
+
+Nous pouvons voir ici que le type de contrat a une importance déterminante dans le Churn. En effet, l'offre de contrat mois/mois entraîne un fort Churn ce qui tend a rejoindre l'analyse du premier graph alluvial.
+Cependant cette analyse est a modérée, car cette offre est peut-être destinée à des clients considérés comme fragile qui ne seraient peut être pas client chez Telco avec d'autres offres de contrat long terme.
+
+
+### Représentation du Churn en densité en fonction de la durée du contrat
+
+```{r}
+ggplot(table) +
+  geom_density(aes(x=tenure,fill=as.factor(Churn), alpha=0.4))+
+  
+  facet_wrap(~Contract, ncol = 3)+
+  
+  ylab("Nombre de clients") +
+
+  ggtitle("Part de Churn en fonction de la durée du contrat") + 
+  
+  scale_fill_brewer(palette="Set1") +
+
+  theme_minimal()   
+```
+
+Dans la logique des choses, nous pouvons voir que la population churn en fonction de l'anciennté du contrat pour les contrat long terme (1 an & 2 ans) cependant dans le cas du contrat "month to month", nous voyons un pic de Churn dès les premiers joursq du début du contrat. C'est une situation quji se remarque souvent dans les études de Churn, en effet, le client peut parfois changer d'avis dans les premiers jours de la signature du contrat et se rétracter (avec remboursement ou non).
+Cependant, cela peut-être aussi du a une mauvaise segmentation de notre offre et de client ayant besoin d'un abonnement téléphonique inférieur à un mois. Peut-être qu'avec une offre de contrat d'une semaine ou journalière, on pourrait capter plus de client qui ne veulent pas aujourd'hui payer un mois inutilement.
+
+### Quelle est l'importance de la détention de plusieurs lignes
+
+```{r}
+ggplot(table) +
+  geom_bar(aes(x=MultipleLines,fill=as.factor(Churn)))+
+  ggtitle("Part de Churn en fonction du nombre de lignes détenues")
+```
+
+
+Sur ce graphique, nous constatons qu'il n'y a pas de relation déterminante entre le fait de posséder un abonnement telephonique (simple ou multilignes) dans le churn 
+
+
+### Quelle est l'importance du Churn en fonction du nombre de service souscrit ?
+
+```{r}
+services <- table
+services$OnlineSecurity <- ifelse(services$OnlineSecurity == 'Yes',1,0)
+services$OnlineBackup <- ifelse(services$OnlineBackup == 'No' | services$OnlineBackup =='No internet service',0,1)
+services$DeviceProtection <- ifelse(services$DeviceProtection == 'No' | services$DeviceProtection =='No internet service',0,1)
+services$TechSupport <- ifelse(services$TechSupport == 'No' | services$TechSupport =='No internet service',0,1)
+services$StreamingTV <- ifelse(services$StreamingTV == 'No' | services$StreamingTV =='No internet service',0,1)
+services$StreamingMovies <- ifelse(services$StreamingMovies == 'No' | services$StreamingMovies =='No internet service',0,1)
+#services$InternetService <- ifelse(services$InternetService == 'No' ,0,1)
+services$nb_services = services$OnlineSecurity + services$OnlineBackup + services$DeviceProtection + services$TechSupport + services$StreamingTV + services$StreamingMovies
+table$nb_services <- services$nb_services
+
+ggplot(data = table, aes(x = nb_services, y =MonthlyCharges )) + geom_point() + geom_smooth(method = "lm")
+
+ggplot(services) +
+  geom_bar(aes(x=nb_services,fill=as.factor(Churn)))+
+  ggtitle("Part de Churn en fonction du nombre de services souscrits")
+
+
+table3 <- services %>%
+  
+  group_by(Churn, OnlineSecurity, OnlineBackup, DeviceProtection, TechSupport, StreamingTV, StreamingMovies,gender ) %>%
+  
+  summarise(N = n()) %>% 
+  
+  ungroup %>%
+  
+  na.omit
+
+alluvial(table3[, c(1:7)],
+         
+         freq=table3$N, border=NA,
+         
+         col=ifelse(table3$Churn == "1", "blue", "red"),
+         
+         cex=0.65,
+         
+         ordering = list(
+           
+           order(table3$Churn, table3$OnlineSecurity==1),
+           
+           order(table3$gender, table3$OnlineSecurity=="Yes"),
+           
+           NULL,
+           NULL,
+           NULL,
+           NULL,
+           
+           NULL))
+
+```
+Il semblerai que le nombre de service souscrit jouerait négativement sur le churn. En effet, on peut voir sur le deuxième output, la proportion de churner diminuer avec le nombre de service souscrit.
+Aussi sur le graphique alluvial, on peut distinguer 2 courants de churner en bleu, le premier tres fort , où les clients churnant n'ont souscrit a aucune offre additionnelle , le deuxième moins fort où la tendance fait une sinusoîde alternant entre divers services ou non. Mais on distingue tout de même un gros flux de churner ne disposant pas d'offre additionelle.
+
+### Remplacement des valeurs manquantes 
+
+la typologie de valeurs manquantes dans le cas de notre dataset est MCAR,
+missing completely at random. Nous avons introduit 10% de NA sur 4 variables qualitatives et quatre variables quantitatives de manières indépendantes et aléatoires, chaque Na présent dans une variable n’a pas d’impact sur les autres Na présents dans chaque autre variable
+
+```{r}
+sum(is.na(table))
+```
+Nous avons ici 1289 valeurs manquates à traiter.
+
+On décide de remplacer les valeurs manquantes par la méthode KNN qui nous permet ici la plus adéquat à la vue du peu d'observation dont nous disposons. Le remplacement par 0 aurait été inadéquat car on aurait eu des sommes payées égales à 0. De même, le remplacement par la moyenne ou la médiane aurait pû être aussi judicieux mais moins intéressant que les kNN qui suit 
+
+```{r}
+set.seed(496)
+#NOMBRE DE NA
+navarspl=colSums(is.na(table))/nrow(table) #valeur manquante
+#navarspl
+tab.kNN=kNN(table[,-21], k=5, imp_var=F)#peut etre long k=5 est le nombre de voisin qu il va regarder pour calculer la dist
+#nume.kNN
+summary(tab.kNN)
+tab.kNN$Churn <- table$Churn
+```
+
+N.B : Etant donné l'aspect prédictif de l'algorithme kNN nous avons enlever la variables Churn pour éviter de biaiser notre modèle.
+
+```{r}
+nume.kNN <- Filter(is.numeric,tab.kNN)
+kar.kNN <- Filter(is.factor,tab.kNN)
+kar.kNN$'customerID' =NULL
+#describe(karacter)
+```
+
+# Etude des intéractions de variables
+
+## Variables numériques
+
+### Etude de corrélation
+
+```{r}
+#Analyse corrélation variable numériques
+par(mfrow=c(1,1))
+M <- cor(nume.kNN)
+corrplot.mixed(M)
+pairs(nume.kNN[, c("tenure", "MonthlyCharges", "TotalCharges")])
+
+```
+
+Nous étudions ici les interactions entre les variables numériques.
+Nous pouvons voir sur notre matrice de corrélation, de forts lien entre certaines variables. Nous pouvons citer notamment les corrélations entre TotalCharges et tenure , TotalCharges et MonthlyCharges. Nous povons dès lors soupçonner la présence de colinéarité entre ces variables afin de connaître la force du lien, pour savoir si leur lien peut-être négatif dans notre modèle.
+
+Sur le graphique "pairs", nous avons mis en relation nos variables corrélées afin de connaître leurs répartitions. Nous pouvons y voir l'effet croissant de l'ancienneté sur le montant total de charge ce qui est logique mais nous pouvons voir aussi l'effet croissant des charges mensuelles sur le montant total de charges, ce qui n'est pas intéressant il s'agit d'une même information.
+
+### Analyse Composantes principales (ACP)
+
+```{r}
+res.pca <- PCA(nume.kNN, quanti.sup=c(9),  graph = FALSE)
+#Valeurs propres et axes
+eig.val <- get_eigenvalue(res.pca)
+eig.val
+
+#Graphique
+fviz_eig(res.pca, addlabels = TRUE, ylim = c(0, 35))
+
+#Extraction des r?sultats (variables)
+var <- get_pca_var(res.pca)
+var
+
+#Cercle de correlation
+fviz_pca_var(res.pca, col.var ="blue", repel = TRUE)
+
+#Contribution des variables
+var$contrib
+
+corrplot(var$contrib, is.corr=FALSE)    
+fviz_contrib(res.pca, choice = "var", axes = 1, top = 7)  #histo par axe
+fviz_contrib(res.pca, choice = "var", axes = 2, top = 7) 
+fviz_contrib(res.pca, choice = "var", axes = 1:4, top = 10) #les 3 axes cumul?s
+
+```
+
+Scree plot: Nous pouvons observer sur ce graphiques le pourcentage de variance expliquée à
+l’aide des valeurs propres, pour chaque dimensions de notre ACP. On peut apercevoir
+que les deux premières dimensions ont une bonne variance cumulée puisqu’elle
+représentent plus de 51% de variance expliquée à elles seules. La coudée se situe au
+niveau de la troisième dimension avec un total de variance cumulée à 64.03%,
+les 5 premieres dimensions se situent au dessus de 10%, pour un total de 86.7%.
+
+Cercle de corrélation : Nous avons ici la projection des variables quantitatives de notre dataset sur le cercle
+de corrélations de notre ACP, avec les deux premières variables ayant une variance
+expliquée des plus élevées (30.6% pour la 1e et 20.9% pour le 2nde).
+Plus une variable est proche de l’axe d’une dimension, et proche du cercle de
+corrélation , plus celle-ci explique l’axe concerné.
+En l’occurence, la variables ‘TotalCharges’ est la plus contributrice de la 1e dimension
+positivement , car proche du cercle de corrélation et de l’axe de la 1e dimension.
+De meme la variable ‘tenure' est la seconde variable la plus contributrice de cette
+dimension. A l’inverse la variable ‘genre’ étant très proche de 0, ne contribue ni à la
+première ni à la seconde dimension. La variable ‘MonthlyCharges’ contribue presque
+à 75% à la 1e dimension et 50% à la seconde. La variables ‘Dependents’ est celle qui
+contribue le plus négativement à la seconde dimension (à 75%). La variable ‘Partner’
+contribue positivement à 50% à la Dim1 et -50% à la dim2. Les variables SeniorCitizen
+et ‘PaperLessBilling' semble évoluer de la même manière car elles sont proches l’une
+de l’autre, contribuant toutes deux environ positivement à 50% à la 2nde dimension.
+La variable cible ‘Churn’ est plutôt proche de l’origine il contribue très peu
+négativement à la première dimension et à environ 25% à la 2nde dimension.
+
+Graph de Corrélation des variables quantitatives aux dimension de l’ACP: La matrice de corrélation confirme ce que nous avons constaté à savoir que les
+variables contribuant le plus à la 1e dimension sont TotalCharges et Tenure.
+De même pour la seconde dimension avec la variable Dependents.
+On constate que le genre est la variable qui contribue presque à 100% à la 3e
+dimension. Les variables Paperlessbilling, Dependents, Partner, Seniorcitizen et tenure
+contribue à la 4e dimension. Enfin SeniorCitizen contribue à le plus à la 5e dimension.
+
+Graphiques de contribution: Les deux graphiques ci-dessus confirme les observations effectuées plus haut, sur le cercle de corrélation et la matrice de corrélation des variables aux dimensions.
+
+Graph contribution dim 1 à 4: Sur la contribution des variables aux dimension 1 à 4 ont s’aperçoit que le gender devance les autres dimensions, notamment grâce à sa contribution totale à la 3e
+dimension.
+
+### Etude de la colinéarité
+
+Au sens strict, on parle de multicolinéarité parfaite lorsqu’une des variables explicatives d’un modèle est une combinaison linéraire d’une ou plusieurs autres variables explicatives introduites dans le même modèle. L’absence de multicolinéarité parfaite est une des conditions requises pour pouvoir estimer un modèle linéaire et, par extension, un modèle linéaire généralisé (dont les modèles de régression logistique).La multicolinéarité n’a aucune incidence sur l’adéquation de l’ajustement, ni sur la qualité de la prévision. Cependant, les coefficients individuels associés à chaque variable explicative ne peuvent pas être interprétés de façon fiable. c'est pour cela qu'il nous est nécessaire de la traiter.
+
+```{r}
+reg <- glm(Churn ~ ., data = nume.kNN, family= binomial())
+print(summary(reg))
+print(vif(reg))
+# Make predictions
+predictions <- reg %>% predict(nume.kNN)
+# Model performance
+data.frame(
+  RMSE = RMSE(predictions, nume.kNN$Churn),
+  R2 = R2(predictions, nume.kNN$Churn)
+)
+```
+
+Le but ici est de déterminé la valeur de la corrélation à travers la colinéarité de nos variables. Une erreur fréquente est de confondre multicolinéarité et corrélation. Si des variables colinéaires sont de facto fortement corrélées entre elles, deux variables corrélées ne sont pas forcément colinéaires. En termes non statistiques, il y a colinéarité lorsque deux ou plusieurs variables mesurent la "même chose". Lors d'une colinéarité parfaite, les variables auront une corrélation égale à 1 mais a contrario, des variables corrélées à 1 ne sont pas forcément colinéaires. Pour estimer cette colinéarité, nous allons utiliser la méthode FIV ("facteurs d’inflation de la variance") 
+
+Nous pouvons voir sur l'output la présence de 2 variables qu'on peut fortement soupçonner de colinéarité de par leur VIF élevé. Il s'agit de tenure (13,37) et TotalCharges (17,2).
+
+```{r}
+reg2 <- glm(Churn ~. -tenure , data = nume.kNN, family= binomial())
+vif(reg2)
+summary(reg2)
+# Make predictions
+predictions2 <- reg2 %>% predict(nume.kNN)
+# Model performance
+data.frame(
+  RMSE = RMSE(predictions2, nume.kNN$Churn),
+  R2 = R2(predictions2, nume.kNN$Churn)
+)
+```
+
+Les FIV estimenent de combien la variance d’un coefficient est "augmentée" en raison d’une relation linéaire avec d’autres prédicteurs. Ainsi, un FIV de 1,8 nous dit que la variance de ce coefficient particulier est supérieure de 80 % à la variance que l’on aurait dû observer si ce facteur n’est absolument pas corrélé aux autres prédicteurs.
+
+En supprimant tenure de la régression nous observons que la régression est de meilleurs qualité de part des R² et AIC croissants et un RMSE qui diminue.
+
+N.B: si la 2 variables sont parfaitement colinéaires alors le coefficient de la variable sera doublé.
+
+## Variables qualitatives 
+
+### Analyse composantes multiples (ACM)
+
+```{r}
+res.mca <- MCA(kar.kNN,graph=FALSE,level.ventil = 0.05) #le level.ventil permet de ventiler les modalit? s'ils repr?sentent moins de 5% 
+
+# garde les eigen value a chaque dimension pour s en servir en coordonnés pour faire une classification dessus 
+#comme k means
+# le v kramer si proche de 1 indique si liaison mais pas l intensité ni le sens ni le lien de causalité
+
+#Obtention des valeurs propres
+
+eig <- get_eigenvalue(res.mca)
+eig
+#Visualisation des axes
+fviz_screeplot (res.mca, addlabels = TRUE, ylim = c (0, 35))
+
+# Travaillons sur les variables
+var <- get_mca_var(res.mca)
+var$contrib
+
+#Correlation entre les variables et les axes... En rouge les variables actives et en bleu les illustratives
+fviz_mca_var (res.mca, choice = "mca.cor",repel = TRUE)
+
+
+#contrib graph (des modalit?s)
+corrplot(var$contrib, is.corr=FALSE,main="Contribution")    
+fviz_contrib(res.mca, choice = "var", axes = 1, top = 10, ylim = c (0, 13))  #histo par axe
+fviz_contrib(res.mca, choice = "var", axes = 2, top = 10, ylim = c (0, 13)) 
+fviz_contrib(res.mca, choice = "var", axes = 1:4, top = 15, ylim = c (0, 10))
+
+#contribution a la variable
+#graph couleur par contrib
+fviz_mca_var(res.mca, col.var = "contrib", gradient.cols = c("red", "yellow", "blue"),repel = TRUE)
+
+```
+
+Graph Scree Plot: On observe ici le pourcentage de variance expliquée par chaque dimension de notre
+ACM, la coudée se situant entre 2 ou 3 dimension. un pourcentage important est
+expliqué par la première dimension (33.5%), les dimension deux 3 expliquant plus de
+10% à 12 et 10.8 pour-cent.
+
+Graph variables MCA: La représentation ci-dessus nous permet d’observer des groupes de variables
+qualitatives. Sur la droite on observe un premier groupe de variables proches,
+qui sont ‘TechSupport’, ‘DeviceProtection’, ‘OnlineBackup’, ‘StreamingTV’,
+‘StreamingMovies’, ‘Online Backup’, et un peu plus bas ‘InternetService’.
+On peut constater que ce groupe s’apparente à un premier groupe de variables
+assimilé à une offre de services qui compose le contrat de chaque individus.
+Un second groupe de variables sur la gauche ‘PaymentMethod’ ‘MultipleLines’
+‘PhoneService’ compose un deuxième groupe qui s’apparente à un profil de client
+possédant ou non un service téléphonique, plusieurs ligne et payant de différentes
+manières. La variable ‘contract’ semble isolé de tout groupe.
+
+Graph Corrélations aux dimensions : La matrice de contribution de l’ACM représente la contribution de chaque modalité
+des variables qualitatives à chaque dimmensions, A l’aide des graphiques ci-dessous
+on observe un peu mieux les modalités les plus contributrices des deux premières
+dimension et des 4 premières dimensions cumulés.
+Concernant la Dim 3 les modalités PhoneService_No et MultipleLines_NoPhoneService
+contribue le plus à la Dim4, les type de contrat One year et two year contribue le plus à
+la Dim5.
+
+Graph Contributions 1&2: Les 7 premières modalités ci-dessus contribuent à plus de 10% à la Dim 1.
+InternetService_No, OnlineSecurity_No internet Service, OnlineBackup_No internet
+Service… jusqu’à Streamingmovies_No Internet service. On s’aperçoit que l’ensemble
+des modalités ci-dessus correspondent aux modalités de certaines variables du
+premier groupe que nous avions identifiés sur l’ACM.
+Les contributions les plus élevées des modalités des variables à la seconde dimension
+sont le type de contrat_2 year, Tech_Support_Yes, contract_month-to-month,
+suivent ensuite les modalités de Deviceprotection, Online_security_yes,
+OnlibeBackup_yes et stremingmovies.
+
+Graph contribution 1&2&3&4:On constate que la contribution des modalités des variables aux 4 dimension correspondent essentiellement à des réponses négatives.
+
+Graph modalités MCA:Le graphique ci dessus permet d’observer plusieurs groupes de modalités vis à vis des 2 premières dimensions de l’ACM, colorés par rapport à leur contributions.
+on observe un premier groupe le plus contributeur en bleu sur la droite, avec
+notamment les modalités ‘Online Backup_No internet Service’, ‘StreeamingMovies_No
+internet Service ‘, ‘streamingTV_No internet Service’ ‘TechSupport_no internet Service’
+Un grand groupe sur la gauche, avec trois ‘sous-groupes’, moins contributeur en rouge
+au milieu et orange/jaune sur les parties hautes et basses du groupe. Les modalités
+Contract_two Year et Techsupport_yes Deviceprotection_yes notamment en haut à
+gauche contribue moyennement aux dimensions de même à l’opposé de l’axe on
+observe notamment les modalités Contract_month-to-month, DeviceProtection_No,
+StreamingMovies_No, Streamingtv_No. Au milieu des axes de ce grand groupes se
+situent les modalités les moins contributrices aux dimensions notamment
+‘phoneService_Yes’, Contract_OneYear, BankTransfer(automatic),
+CreditCard(automatic).
+
+### Suspicion colinéarité entre MultipleLines et InternetServices
+
+```{r}
+test <- table(kar.kNN$MultipleLines,kar.kNN$InternetService)
+test
+chisq.test(test)
+cramer.v(test)
+#sqrt(2217/(2*(1048 + 1158 + 1184 + 682 + 691 + 1938 +342)))
+```
+En général on accepte l'hypothèse d'indépendance lorsque p-value est supérieure à 5 % (0,05).
+
+En l'occurrence p-value est inférieure à 1 pour mille (0,001) on rejette donc largement l'hypothèse d'indépendance. On peut donc affirme avec moins d'une chance sur mille de se tromper qu'il existe un lien statistique entre les lignes et les colonnes de notre tableau. Et par conséquent entre nos variables MultipleLines et InternetService.
+Il nous reste maintenant qu'à quantifier cette relation afin de déterminer si celle-ci peut-être préjudiciable ou non. 
+Pour la quantifier nous utilisons la méthode du V de Cramer 
+
+Int V.Cramer : [0;0.1[ Relation nulle ou très faible 
+[0.1;0.2[ Relation faible`
+]0.2;0.3[ relation moyenne`
+[0.3;inf[ relation forte`
+La relation ici est donc forte mais étant donné que nous n'utiliserons pas de GLM dans la partie supervisée, nous nous en soucierons peu.
+
+# Analyse non supervisée 
+
+## Tandem Analysis
+```{r}
+set.seed(496)
+rownames(tab.kNN) <- tab.kNN$customerID
+tab.kNN$'customerID' =NULL
+data <- tab.kNN#[1:3000,]
+
+##Réalisation de l'Analyse factorielle multi dimensionnelle 
+res.famd <- FAMD(data,sup.var=data$Churn , graph = T)
+```
+
+Interprétation graph variables (quanti/quali),modalités et cercle de corrélation:
+
+Le diagnostic de ce graphique révèle que les variables de types « services » que les clients avaient souscrits semblent être les variables plus influentes au niveau de la première composante. En effet, la famille de variables « services » est en grande partie (y compris online security, streaming, device protection…) située à l’extrémité droite de l’axe 1. Par ailleurs les variables de type « démographique » à savoir partner, dependents, senior, gender ne semblent pas être déterminantes au niveau de la première composante. Autrement dit, le niveau de dispersion des individus que capte cette première dimension est en grande partie du aux variables « services ». S’agissant de la seconde composante, on peut noter que les individus se distinguent le plus par leur ancienneté (c’est-à-dire vis-à-vis de la variable tenure), leur type de contrat et également par le total des charges.  
+
+
+Le graphique suivant vient affiner le graphique ci-dessus en y figurant non pas les variables mais plutôt les modalités que prennent ces variables. Comme nous l’avons constaté, les variables « services » sont relativement plus déterminantes au niveau de la première composante. Ici, dans ce graphique on peut corroborer ce constat. Par exemple, la modalité « no internet service » qui est une modalité commune à plusieurs variables (comme onlinesecurity, onlinebackup…) se trouve bien à l’extrémité gauche de l’axe 1pour la plupart des variables en question, alors que naturellement les réponses de types « yes » ou « no » sont du côté droit. Ceci traduit le fait que les différences entre les individus sont en rapport avec leurs choix de divers services que la compagnie leur offre en options. S’agissant de la deuxième composante, on remarque qu’à l’extrémité positive (coordonées positives) de cet axe 2, on trouve la modalité « two year » qui indique que le contract est relativement sur une longue durée, alors que l’autre extrémité négative, on y voit des modalités month-to-month, c’est-à-dire plutôt des clients du court terme qui évitent de s’engager sur plus long terme. 
+La visualisation des variables quantitatives dans le même plan factoriel montre que la variables « monthlycharges » est la plus corrélée avec la première composante première. Dans le même temps, les variables tenure et Churn semblent être le plus corrélées à la deuxième composante principale. 
+```{r}
+eig.val <- get_eigenvalue(res.famd)
+fviz_screeplot(res.famd)
+eig.val
+```
+
+Interprétation Scree plot: La représentation de nuage des points-variables dans le plan factoriel permet d’avoir une idée plus claire de contributions de chaque variable dans la constitution de deux composantes principales (axe 1 et axe 2). Le premier axe capte à lui seul 28 % de l’inertie totale alors que le second retient uniquement environ 16 %. Ce premier plan factoriel retient environ 44 %. 
+
+```{r}
+## Réalisation de la CAH sur les données traitées par la FAMD
+res.hcpc <- HCPC(res.famd, 
+                 nb.clust = -1, graph = TRUE)
+```
+
+```{r}
+fviz_dend(res.hcpc, 
+          cex = 0.7,                     # Taille du text
+          palette = "jco",               # Palette de couleur ?ggpubr::ggpar
+          rect = TRUE, rect_fill = TRUE, # Rectangle autour des groupes
+          rect_border = "jco",           # Couleur du rectangle
+          labels_track_height = 0.8      # Augment l'espace pour le texte
+)
+
+fviz_cluster(res.hcpc, 
+             geom = "point",
+             repel = TRUE,            # Evite le chevauchement des textes
+             show.clust.cent = TRUE, # Montre le centre des clusters
+             palette = "jco",         # Palette de couleurs, voir ?ggpubr::ggpar
+             ggtheme = theme_minimal(),
+             main = "Factor map"
+)
+
+head(res.hcpc$data.clust, 30)
+a <- res.hcpc$data.clust
+a$Churn <- data$Churn
+table(a$Churn, a$clust)
+
+```
+
+La classification permet de mieux visualiser les différences entre les différents profils de clients en les classant dans un nombre restreint de classes dont l’inertie intra-classe est la plus minimale possible et l’inertie interclasse la plus forte possible. L’idée est d’agréger les classes tout en minimisant la perte d’inertie inter.
+Le premier graphique montre la classification hiérarchique ascendante ainsi que la perte d’inertie inter consécutive à chaque agrégation des classes. Ce calcul est à la base de la méthode de Ward qui détermine le nombre de classes optimales minimisant la perte d’inertie inter. Ainsi, ce graphique montre, par exemple, que le fait de passer de deux classes à une seule fait perdre en inertie inter environ 8 (à comparer par rapport à l’inertie totale qui n’est d’autre le nombre de variables retenues dans le modèle). On peut noter qu’en passant de quatre classes à trois, que la perte d’inertie commence à être plus conséquente. C’est ce qui explique notre choix de retenir quatre classes. 
+La visualisation dans le plan factoriel de différents individus selon leur appartenance aux quatre classes ainsi identifiées nous permet de bien voir ce qui distinguent ces classes. La classe 1 se distingue par rapport aux trois autres classes. La classe 1 se distingue notamment selon la première composante. Le recoupement avec ce que nous avons développé plus haut implique que comme tous les clients de classe 1 sont du côté gauche de l’axe 1 et que les modalités qui se trouvent dans cette région sont surtout des gens n’ayant pas service internet et qui sont également des « no partner » (qui n’ont pas de partenaires). Les classes 2 à 4 se distinguent très peu selon la première composante tant que tous les individus sont du côté positif de cet axe. 
+La deuxième composante a plus de pouvoir de différenciation notamment entre la classe 2 et la classe 4. Si l’on transpose aussi les modalités dans ce même plan factoriel où sont situées les différentes classes, on peut dire que les clients appartenant à la classe 4 semblent être, par exemple, plus enclins à avoir des contrats sur une longue durée que la classe 2 englobe des clients plutôt de courte durée et qui sont probablement de potentiels « churneurs »
+Le croisement de quatre classes avec selon si le client est « churneur » ou pas montre qu’effectivement une grande partie des clients contenus dans la classe sont des churneurs, et dans une moindre proportion la classe 4 a relativement une part de clients churneurs également.
+
+
+## K-Means
+
+Le recours à la méthode K-means qui est un algorithme d’agrégation autour des centres mobiles. Cet algorithme débute avec un choix arbitraire des centres de classe et ensuite affecter chaque individu selon sa proximité au centre le plus proche. 
+
+
+```{r}
+set.seed(496)
+dmy2 <- dummyVars(" ~ .", data = tab.kNN)
+dmy2 <- data.frame(predict(dmy2, newdata = tab.kNN))
+dmy2$"Churn"=NULL
+dmy2 <- dmy2#[1:3000,]
+
+dta.cr <- scale(dmy2)
+
+d.dta <- dist(dta.cr)
+
+## Detection du nombre optimal de classes 
+## Avec factoextra 
+fviz_nbclust(dta.cr, hcut, method = "wss") #1er output
+```
+
+1er output: Le graphique qui présente le nombre optimal des classes indique la variabilité intra ou within qui décroit avec le nombre de classes. On voit que la courbe est relativement coudée au niveau de nombre de classes 4, ce qui indique que le nombre optimal est quatre classes. Ainsi, la CAH ainsi que la méthode K-means s’accordent sur le nombre de classes. 
+
+```{r}
+set.seed(496)
+## CAH
+cah.ward <- hclust(d.dta,method="ward.D2")
+cah.ward
+```
+
+```{r}
+set.seed(496)
+groupes.cah <- cutree(cah.ward,k=4) ## Couper le dendrogramme en 4 groupes comme vu sur le graphique précédent
+
+#K-Means
+groupes.kmeans <- kmeans(d.dta,centers=4,nstart=5)
+head(groupes.kmeans$cluster,20)
+```
+
+```{r}
+## Correspondance avec les groupes de la CAH 
+
+print(table(groupes.cah,groupes.kmeans$cluster)) #2ème output
+```
+
+2eme output: La classification selon cette méthode montre une part de l’inertie between dans l’inertie totale qui représente environ 77%. D’ailleurs, le graphique où on a mis en abscisses le nombre de classes et en ordonnées, la part de l’inertie expliquée montre que l’augmentation de cette part d’inertie expliquée s’accroit fortement quand passe d’une classe à deux, mais s’affaiblit quand le nombre de classes augmente. On peut remarquer qu’à partir de la classe 4, la hausse de l’inertie expliquée commence à s’accroitre encore d’une façon très modeste. Ceci corrobore le choix de quatre classes. 
+
+
+```{r}
+## Evaluer la proportion d'inertie expliqu?e
+inertie.expl <- rep(0,times=10)
+for (k in 2:10){
+  clus <- kmeans(d.dta,centers=k,nstart=5)  
+  inertie.expl[k] <- clus$betweenss/clus$totss
+}
+
+#graphique de l'inertie expliquée (3ème output)
+plot(1:10,inertie.expl,type="b",xlab="Nombre de groupes",
+     ylab="% inertie expliqu?e", col="blue", lwd=1.5)
+
+```
+
+3ème output: Pour comparer les similarités dans les compositions de différentes classes, nous avons fait un recoupement de deux méthodes. Nous voyons beaucoup de divergence entre les classes affectés par ces méthodes différentes. On juge donc que cette méthode n'est pas fiable pour notre problème, ou tout du moins, moins fiable que la première.
+
+# Apprentissage supervisé 
+
+## Préparation des données 
+
+Nous séparons ici notre base de donées en divers jeu. Il nous faut ici au minimum une base de test et une base d'entraînement.
+Une base d'entraînement sur laquel le modele va s'entrainer et une base de test pour voir la qualité de notre modèle.
+
+```{r}
+set.seed(496)
+dmy <-tab.kNN
+rownames(dmy) <- dmy$customerID
+dmy$'customerID' <-  NULL
+dmy <- dummyVars(" ~ .", data = dmy)
+dmy <- data.frame(predict(dmy, newdata = tab.kNN))
+
+ind=createDataPartition(dmy$Churn,times=1,p=0.8,list=FALSE)
+
+train_val=dmy[ind,]
+test_val=dmy[-ind,]
+X_train=train_val[,-43]
+y_train=as.factor(train_val[,43])
+X_test=test_val[,-43]
+y_test=as.factor(test_val[,43])
+
+train_val2=train_val[,c("tenure","TotalCharges","MonthlyCharges","Contract.Month.to.month","Contract.Two.year","TechSupport.No","InternetService.DSL","InternetService.Fiber.optic","gender","Contract.Two.year","Partner","OnlineBackup.No","OnlineSecurity.No","PaperlessBilling","PaymentMethod.Electronic.check","nb_services","Contract.One.year","Churn")]
+
+test_val2=test_val[,c("tenure","TotalCharges","MonthlyCharges", "Contract.Month.to.month","Contract.Two.year","TechSupport.No","InternetService.DSL","InternetService.Fiber.optic","gender","Contract.Two.year","Partner","OnlineBackup.No","OnlineSecurity.No","PaperlessBilling","PaymentMethod.Electronic.check","nb_services","Contract.One.year","Churn")]
+X_train2=train_val2[,-18]
+y_train2=as.factor(train_val2[,18])
+X_test2=test_val2[,-18]
+y_test2=as.factor(test_val2[,18])
+```
+
+## Abre de décision
+
+L'objectif de notre arbre de décision est donc de classer les clients en 2 classes en fonction de leur churn ou non. A chaque étape, l'algorithme va chercher le critère permettant de séparer au mieux ces deux populations. Il existe plusieurs critères de séparation, dans notre exemple nous allons utiliser l'indice de Gini qui est utilisé pour les arbres CART
+
+Pour construire notre arbre de décision, nous allons utiliser la commande rpart.
+Nous avons vu dans le cours, certains des paramètres adaptés à notre situation : nous avons ici la method qui est de type "class" car nous somme dans une situation ou la target est binaire; nous avons le paramètre minsplit qui est fixé à 5, c'est-à-dire que l'abre continuera à séparer les données tant que l'abre contiendra au moins 5 données. Enfin le paramètre CP est indicateur d'amélioration du modèle, si celui-ci est fixé a 0 alors le découpage à quand même lieu même si celui-ci n'améliore pas le modèle.
+
+```{r}
+set.seed(496)
+#Construction de l'arbre 
+class.churn <- rpart(Churn~., data=train_val, method="class",control= rpart.control(minsplit=5,cp=0)) 
+#affichage du résultat
+plot(class.churn , uniform=TRUE, branch =0.5, margin =0.1)
+text(class.churn, all=FALSE, use.n=TRUE)
+```
+
+Résultat: Nous avons ici un arbre illisible dont il nous est impossible de tirer la moindre conclusion. Il est beaucoup trop développé et nécessite un élagage afin de le simplifier et pour éviter surtout le surapprentissage.
+
+L'élagage fonctionne par niveau, nous devons tout d'abord le fixer. 
+Pour cela, nous créons un graph qui nous permettra de visualiser le taux de mauvais classement en fonction de la complexité paramètrée (CP). On pourra ainsi minimiser l'erreur pour un complexité donnée.
+
+```{r}
+set.seed(496)
+#On cherche a minimier l'erreur pour definir le niveau d'élagage
+plotcp(class.churn)
+
+#Affichage du cp optimal
+print(class.churn$cptable[which.min(class.churn$cptable[,4]),1])
+
+#Elagage de l'arbre avec le CP optimal 
+set.seed(496)
+class.churn_Opt <- prune(class.churn, cp=class.churn$cptable[which.min(class.churn$cptable[,4]),1])
+```
+
+Il ne nous reste maintenant plus qu'à représenter ce nouvel arbre avec la complexité optimale.
+L'arbre reste encore assez compliqué à lire sur la console R mais les règles de construction de l'arbre sont, elles, beaucoup plus simples, chaque ligne y représente une feuille. On peut voir qu'à la première étape, l'algorithme prend tous les individus et recherche la variables qui sépare le mieux les individus en 2 populations. La variable est sélectionnée selon le critère de l'indice de Gini. Plus celui-ci sera élevé, mieux le découpage sera. Chacun de ces découpages conduit à diviser l'échantillon en deux populations de part leurs facteurs discriminants les plus marquants.
+
+```{r}
+set.seed(496)
+#Représentation graphique de l'arbre optimal
+prp(class.churn_Opt, extra=8)
+#affichage des regles de construction de l'arbre 
+print(class.churn_Opt)
+```
+
+Nous pouvons voir sur cet arbre le cheminement des individus et la manière dont l'algorithme predit. En effet, à chaque feuille de cet arbre, on peut voir 2 chiffres. 0 ou 1 pour dire de quel type sera l'individus qui se retrouvera à ce niveau de l'arbre, et la proportion associée de cette classe. Par exemple, si on prend les deux feuilles à n'importe quelle extrémité de l'arbre, si l'individu respecte la condition de la variable il est marqué comme non churner et se retrouve classé dans la feuille de gauche avec le 0 indiquant son état.A contrario s'il ne respecte pas la condtion il est marqué comme churner et se retrouve donc sur la feuille de droite avec un "1" symbolisant son churn. En dessous de cette modalité binaire, on retrouve aussi la proportion de personne predite justement.
+
+Nous allons maintenant observer la qualité de prédiction de ce modèle: 
+
+```{r}
+#Prediction du modele sur les données test
+class.churn.test_Predict <- predict(class.churn_Opt, newdata=test_val, type = "class")
+confusionMatrix(class.churn.test_Predict,y_test)
+
+#erruer de classement 
+mc <- table(test_val$Churn, class.churn.test_Predict)
+erreur.classement <- 1.0-(mc[1,1]+mc[2,2])/ sum(mc)
+print(erreur.classement)
+#ou encore
+1-(945+176)/(945+182+105+176)
+#taux de prediction (VN/ VN+FP) (spécificité = capacité du modèle à détecter les négatifs = ceux qui vont survivre)
+prediction=mc[2,2]/sum(mc[2,])
+print(prediction)
+(176)/(176+182)
+```
+
+L'erreur de classement nous donne le pourcentage d'erreur du modèle. Nous avons vu dans le cours cette formule mais elle peut être réécrite ainsi:1-(VP + VN)/VP + VN + FP +FN ou encore 1-AUC/Total indiv
+
+Nous obtenons comme résultat: une Accuracy très bonne qui représente le pourcentage de client bien classés. 
+Attention, ce chiffre est à prendre avec des pincettes car, étant donné le déséquilibrage des données que nous avons (80% non churners vs 20% churners) il se peut que le modèle classe tous les individus en non churners et qu'il se trompe ainsi sur tous les churners en ayant une bonne AUC. Ce moèle serait dès lors mauvais et inutile.
+Il nous faudra alors regarder d'autres indicateurs comme la matrice de confusion ou on peut constater que le modèle a capté autour de 50% de churners. Ce qui reste un bon score. Cet indicateurs correspond au taux de prediction et est calculé sur : le nombre de churner prédit / le nombre de churner observé
+
+Nous allons maintenant essayer d'améliorer notre résultat avec des modèles plus élaborés
+
+## Random Forest de Breiman
+
+Il s'agit d'un algorithme qui effectue un apprentissage en parallèle sur de multiples arbres de décision construits aléatoirement et entraînés sur des sous-ensembles de données différents. Le nombre idéal d’arbres, qui peut aller jusqu’à plusieurs centaines voire plus, est un paramètre important : il est très variable et dépend du problème. Concrètement, chaque arbre de la forêt aléatoire est entrainé sur un sous ensemble aléatoire de données selon le principe du bagging, avec un sous ensemble aléatoire de features (caractéristiques variables des données) selon le principe des « projections aléatoires ». Les prédictions sont ensuite moyennées lorsque les données sont quantitatives ou utilisés pour un vote pour des données qualitatives, dans le cas des arbres de classification. L’algorithme des forêts aléatoires est connu pour être un des classifieurs les plus efficaces « out-of-the-box » (c’est-à-dire nécessitant peu de prétraitement des données). Il a été utilisé dans de nombreuses applications, y compris grand public, comme pour la classification d’images de la caméra de console de jeu Kinect* dans le but d’identifier des positions du corps.
+
+Nous testons tous d'abord un randomForest avec des paramètres basiques prédéfinis dans la fonction.
+
+```{r}
+set.seed(496)
+#Entraînement du modèle
+rf.1 <- randomForest(x = X_train,y=y_train, importance = FALSE, ntree = 500)
+rf.1
+
+#graoh permettant de visualiser le taux de mauvais classement en fonction du nombre d'arbre
+plot(rf.1, ylim=c(0,0.6))
+legend('topright', colnames(rf.1$err.rate), col=1:3, fill=1:3)
+
+
+importance<- importance(rf.1)
+#Attribution de l'importance des variables par Moyenne decroissante du coefficient de Gini
+varImportance <- data.frame(Variables = row.names(importance),Importance = round(importance[ ,'MeanDecreaseGini'],2))
+
+# Classement des bariables par niveau d'importance
+rankImportance <- varImportance %>%
+  mutate(Rank = paste0('#',dense_rank(desc(Importance))))
+
+# Graph permettant d evisualiser l'importance des varaibles
+ggplot(rankImportance, aes(x = reorder(Variables, Importance), 
+    y = Importance, fill = Importance)) +
+  geom_bar(stat='identity') + 
+  geom_text(aes(x = Variables, y = 0.5, label = Rank),
+    hjust=0, vjust=0.55, size = 4, colour = 'red') +
+  labs(x = 'Variables') +
+  coord_flip()
+
+#Résultats
+pred=predict(rf.1,newdata = X_test)
+confusionMatrix(pred,y_test)
+
+rf.roc <- roc(response = y_test, predictor = as.numeric(pred))
+plot(rf.roc, col = "red",print.auc = TRUE)
+187/(171+187)
+```
+
+Observations: Dans ce premier randomFOrest réalisé, nous pouvons voir quelques éléments importants:
+Le premier graph nous montre le taux d'erreur du modèle entraîné en fonction du nombre d'arbre sélectionné. NOus pouvons voir que dans notre cas précis, augmenter de beaucoup les arbres ne serait pas très efficace car cela ne nous ferait pas gagner plus de précision( diminution du taux d'erreur). Nous pouvons voir qu'à partir de 150 arbres le modèle ne s'améliore plus. Il ne sert donc à rien d'augmenter notre nombre d'arbre car cela serait gaspiller du temps inutilement et contribuer à du sur-aprentissage.
+NOus avons aussi à disposition un classement de variables par importance soit par décroissance de l'accuracy contribuée moyenne soit part par gini décroissant. Attardons nous sur le critère Gini, on peut y voir que les différentes variables n'ont pas la même importance dans le modèle. Certaines mêmes sont inutiles. Nous allons donc reproduire le même RandomFOrest en gardant nos variables majeures. Cela aura pour avantage de garder une bonne prédiction tout en limitant la durée du calcul.
+
+Résultat: A la vue de la matrice de confusion , le modèle predit bien les churners même si cela reste en dessous de nos espérances,nous prédisons tout de même mieux que l'arbre de décision et la détection de Churner est autour de 50%. Nous gagnons 3 points de pourcentage par rapport à l'arbre.
+L'AUC quant à elle est aussi bonne à 0.8. Cela nous permet donc d'avoir une courbe ROC de bonne qualité et un modèle fonctionnel.
+
+
+```{r}
+
+#Nouveau randomForest avec les 17 variables les plus importantes précédentes
+set.seed(496)
+rf.2 <- randomForest(x = X_train2,y=y_train2, importance = TRUE, ntree = 150)
+rf.2
+
+pred2=predict(rf.2,newdata = X_test2)
+confusionMatrix(pred2,y_test2)
+rf.roc2 <- roc(response = y_test2, predictor = as.numeric(pred2))
+plot(rf.roc2, col = "darkgreen",print.auc = TRUE)
+```
+
+L'AUC est moins bonne car on a supprimé de l'information mais moins de temps de calcul. Nous décidons donc de continuer avec l'ensemble des variables étant donné la taille résonnable de nos observations.
+
+Pour tenter d'améliorer notre modèle, nous décidons d'utiliser de nouveaux paramètres ainisi que la technique de la K-Fold cross-validation qu'on repètera 4 fois afin d'améliorer nos résultats tout en limitant le surapprentissage.
+
+
+```{r}
+library("mlbench")
+library("caret")
+library("randomForest")
+set.seed(496)
+
+#Paramètres Validation croisée
+rf_Control <- trainControl(method = "cv", number = 5)
+
+
+#Paramètre du RandomForest
+tunegrid <- expand.grid(.mtry=c(25:42), .ntree=c(50,100,200))
+
+#Customisation de notre RandomForest afin de l'adapter à notre situation avec les paramètres adéquats
+customRF <- list(type = "Classification", library = "randomForest", loop = NULL)
+customRF$parameters <- data.frame(parameter = c("mtry", "ntree"), class = rep("numeric", 2), label = c("mtry", "ntree"))
+customRF$grid <- function(x, y, len = NULL, search = "grid") {}
+customRF$fit <- function(x, y, wts, param, lev, last, weights, classProbs, ...) {
+  randomForest(x, y, mtry = param$mtry, ntree=param$ntree, ...)
+}
+
+customRF$predict <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+   predict(modelFit, newdata)
+customRF$prob <- function(modelFit, newdata, preProc = NULL, submodels = NULL)
+   predict(modelFit, newdata, type = "prob")
+customRF$sort <- function(x) x[order(x[,1]),]
+customRF$levels <- function(x) x$classes
+
+#Entraînement du modèle
+set.seed(496)
+rf.cv<- train(x = X_train, y = y_train,  method=customRF, tuneGrid=tunegrid, trControl=rf_Control)
+rf.cv
+
+
+#Evolution de l'accuracy en fonction des différents paramètres sélectionnés
+ggplot(rf.cv)
+
+#Résultats
+pred3 <- predict(rf.cv,test_val)
+confusionMatrix(pred3,y_test)
+rf.roc3 <- roc(response = y_test, predictor = as.numeric(pred3))
+plot(rf.roc3, col = "darkblue",print.auc = TRUE)
+```
+
+Sur ce dernier modèle de RandomForest, nous avons poussé celui dans l'espoir de le rendre plus robuste et plus efficient.
+Nous avons d'une part utiliser la méthode de la Cross-Validation, la validation croisée est un moyen de prédire l'efficacité d'un modèle sur un ensemble de validation hypothétique . Il existe 2 méthodes de validation croisée : la K-Fold ainsi que la LOOCV.
+Nous avons choisi d'utiliser la K-FOLD ici. Nous avons donc découpé notre jeu d'entrainement en 5 échantillons. Quatre sont utilisés pour entraîner le modèle et le dernier est utilisé pour la validation. Cette façon de faire rend notre prédiction sur le test plus robuste et potentiellement avec de meilleurs résultats. Dans le pire des cas on ne peut avoir une AUC qui chute totalement avec cette technique.
+Nous avons choisi aussi de "tuner" notre modèle avec quelques paramètres tels que le nombre de variables utilisées au hasard à chaque fractionnement(mtry)pouvant aller de 25 à 42 variables.
+Aussi nous faisons varier le nombre d'arbre à créer par l'algorithme. En gardant toujours à l'esprit qu'un trop grand nombre d'arbre ne contribue pas forcément à augmenter la qualité de la prediction et peu même nous faire tendre vers du sur-apprentissage, tout en consommant beaucoup de temps de calcul. Faire varier le nombre d'arbre à utiliser nous permettra de déterminer environ le nombre d'arbre optimal. On se doute d'avance que ce chiffre sera probablement compris entre 50 et 100 suite à notre premier randomFOrest, où nous avons pu observer que l'erreur ne diminuait plus après la création de 50 arbres, mais dans la logique de notre projet de recherche et dans un soucis de rigoureusité nous preférons tester notre paramètre mtry avec chacune des itérations du nombre d'arbre. En effet, le modèle est les variables utilisées pouvant différer, le nombre d'arbre nécessaire peut être différent.
+
+Résultat: Sans être exceptionnels, les résulats sont plutôt bon. Cependant on pense qu'on aurait encore eu de meilleurs résultats en faisant varier plus amplement le nombre de variables utilisées dans l'arbre (mtry). De même, les résultats auraient encore été plus robuste et meilleurs, si nous avions effectué une validation croisée répétée n fois (par 5 par exemple)
+
+
+
+## Gradient Boosting
+
+Les algorithmes de Boosting  jouent un rôle crucial dans la conciliation biais variance. Contrairement aux algorithmes de bagging, qui ne contrôlent que les grosses variances dans le modèle, le boosting gère les 2 aspects, et est considéré comme plus efficace. 
+En une explication succinte, le boosting peut-être vu comme une aggrégation d'une succesion d'arbres à faible pouvoir prédictif (weak learner) par des poids en fonction de si la prédiction est juste ou non.
+Ainsi, le boosting est une technique séquentielle qui marche sur le principes des ensembles. Il combine un ensemble de weak learners et offre une précision de prédiction améliorée.
+A tout instant t, les résultats du modèle sont pondérés en fonction en fonction des résultats de l’instant précédent t-1. Les resultats justes ont un poids attribué plus faible que les résultats non justes.
+
+Le descente de gradient est la technique utilisée dans tous les aglgorithmes de boosting. Le but est d'utiliser l'algorithme afin de déterminer le minimum d’une fonction, la fonction de coût. Nompbre de fonctions de coût sont prédéfinies dans les packages, cependant nous avons aussi la possibilité d'en créer une propre à notre besoin. Il s'agit d'une technique robuste qui a largement fait ses preuves.
+On trouve d'ailleurs beaucoup de variantes permettant encore d'améliorer les résultats. On peut citer les plus connus comme l'Adaboost, le XGboost, le LightBoost, le Catboost.
+
+Pour débuter, étant donné la puissance limitée de nos appareils, nous décidons de lancer une première fois notre algorithme, avec une série de paramètres simples, sur un nombre d'arbre assez large (2000) pour déterminer la fourchette sur laquelle se situerait notre nombre d'arbre optimal en recherchant nos paramètres optimaux. En effet, si par chance nous nous situons autour de 500 arbres pour avoir nos meilleurs résultats prédictifs sur le jeu de test alors il y a peu de chance que notre second modèle varie énormément en fonction des paramètres optimaux. DOnc ,nous  préférons segmenter notre travail de la sorte.
+
+```{r}
+set.seed(496)
+#Réalisons tout d'abord un GBM classique afin de voir comment celui-ci évolue.
+grad.boost=gbm(Churn ~ . ,data = train_val,distribution = "gaussian",n.trees = 2000,
+               shrinkage = 0.01, interaction.depth = 4,cv.folds = 5)
+grad.boost
+
+#Nous créons un vecteur qui fera varier le nombre d'arbre utilisé pour la prédiction sur le test
+n.trees = seq(from=100 ,to=2000, by=100)
+
+#Generating a Prediction matrix for each Tree
+predmatrix<-predict(grad.boost,test_val,n.trees = n.trees)
+
+#ON calculera ici l'erreur moyenne obtenu par chaque salve d'arbre (ex: erreur moyenne du modèle à 100 arbres vs erreur moyenne du modèle à 8300 arbres)
+test.error<-with(test_val,apply( (predmatrix-Churn)^2,2,mean))
+head(test.error) 
+a=data.frame(test.error)
+#Représentation de l'évolution  de ces erreurs moyennes par centaines d'abres
+
+plot(n.trees , test.error , pch=19,col="blue",xlab="Number of Trees",ylab="Test Error", main = "Perfomance of Boosting on Test Set")
+
+# Représentation graphique de la loss function loss function sur la table de test (vert) et d'entraînement (noir)
+gbm.perf(grad.boost, method = "cv")
+```
+
+Ici l'importance des variables n'est pas très importante car à chaque arbre est affecté un poids en fonction de si celui-ci predit bien ou non la target.
+Nous allons observer plus précisément ici l'évolution de l'erreur sur le jeu de test en fonction du nombre d'arbre utilisé. Nous constatons que le graphqiue est concave et possède donc un minimum. Ce minimum nous ne pouvons pas le déterminer ici, du fait de l'incrémentation par centaine choisi, mais nous pouvons cependant émettre la conjecture suivante : nous pensons que le nombre d'abre optimal se situeras dans un intervalle [0;1000] d'abres crées.
+
+Sur le graph du nombre d'itération optimal d'arbre, nous pouvons voir 2 courbes, l'une verte montre la variation de l'erreur du test tandis que l'autre, noire, représente la variation de l'erreur sur les données d'entraînement renforcées par validation croisée. Nous remarquons quelque chose d'intéressant, à partir d'un certain niveau, la courbe verte reste plus ou moins constante tandis que la courbe noir tend inéxorablement vers 0. l'interprétation se veut alors des plus simples, plus il y a d'arbre plus l'erreur du jeu d'entraînement est faible car celui tend vers le sur-apprentissage, et n'améliore par conséquent par les résultats du jeu de test, et peu même les rendre moins bons voir nuls (on ne le voit pas sur notre graph mais si nous avions mis 10000 itérations la courbe verte deviendrait croissante lorsque l'itération tendrait vers l'infini) . Ce ces deux courbes , l'allgorithme nous trace une droite verticale qui nous fournit le nombre optimal d'arbre. C'est le nombre qui minimise l'erreur tout en évitant au mieux le sur apprentisage. Cette observation concorde donc avec notre premier graph et nous amènera à tester nos paramètres optimaux sur un intervalle de [0;1000] arbres. 
+
+
+```{r}
+set.seed(496)
+#Déterminons les paramètres optimaux de notre gradient boosting machine 
+
+hyper_grid <- expand.grid(
+  shrinkage = c(.01, .1, .3),
+  interaction.depth = c(1, 3, 5),
+  n.minobsinnode = c(5, 10, 15),
+  bag.fraction = c(.65, .8, 1), 
+  optimal_trees = 0 ,             # paramètre qui sera remplit par la suite une fois le nombre optimal d'arbre déterminé
+  min_RMSE = 0                     # de la même facon on cherchera le RMSE le plus petit pour sélectionner nos paramètres
+)
+
+
+# Préparation de nos données d'entraînement conformément à l'algorithme.
+train_val_index <- sample(1:nrow(train_val), nrow(train_val))
+train_gbm<- train_val[train_val_index, ]
+
+# grid search 
+for(i in 1:nrow(hyper_grid)) {
+  
+
+  set.seed(496)
+  
+  # Entrâinement
+  gbm.tune <- gbm(
+    formula = Churn ~ .,
+    distribution = "bernoulli",
+    data = train_gbm,
+    n.trees = 1000,
+    interaction.depth = hyper_grid$interaction.depth[i],
+    shrinkage = hyper_grid$shrinkage[i],
+    n.minobsinnode = hyper_grid$n.minobsinnode[i],
+    bag.fraction = hyper_grid$bag.fraction[i],
+    train.fraction = .75,
+    verbose = FALSE
+  )
+  
+  # Ajout des paramètres signalant l'optimalité
+  hyper_grid$optimal_trees[i] <- which.min(gbm.tune$valid.error)
+  hyper_grid$min_RMSE[i] <- sqrt(min(gbm.tune$valid.error))
+}
+# Paramètres optimaux
+hyper_grid %>% 
+  dplyr::arrange(min_RMSE) %>%
+  head(5)
+
+hyper_grid=hyper_grid[order(hyper_grid$min_RMSE),]
+
+
+# Entraînement du GBM avec paramètres optimaux réinseré directement dans l'algorithme d'entraînement.
+gbm.fit.final <- gbm(
+  formula = Churn ~ .,
+  distribution = "bernoulli",
+  data = train_gbm,
+  n.trees = hyper_grid[1,5],
+  interaction.depth = hyper_grid[1,2],
+  shrinkage = hyper_grid[1,1],
+  n.minobsinnode = hyper_grid[1,3],
+  bag.fraction = hyper_grid[1,4], 
+  train.fraction = 1,
+  verbose = FALSE
+  )  
+
+# Importance des variables
+par(mar = c(5, 8, 1, 1))
+summary(
+  gbm.fit.final, 
+  cBars = 10,
+  method = relative.influence, # also can use permutation.test.gbm
+  las = 2
+  )
+
+#Prediction 
+predgbm <- predict(gbm.fit.final, n.trees = gbm.fit.final$n.trees, X_test,type="response")
+head(predgbm,5)
+predictiongbm=as.factor(ifelse(predgbm>0.51,1,0))
+
+#Resultats
+confusionMatrix(predictiongbm,y_test)
+
+Errors=prediction(predgbm,y_test)
+ROC <- performance(Errors,"tpr","fpr")
+plot(ROC,col="brown")
+
+
+AUC <- performance(Errors,"auc")
+AUC<-as.numeric(AUC@y.values)
+AUC
+```
+
+Après le premier algorithme qui nous a donné une idée assez large du nombre d'arbre où se situerait notre meilleur prédiction, nous décidons d'améliorer notre algorithme en lui proposant une liste de différents paramètres qu'il pourra modifier pour trouver la meilleur prédiction. Ces paramètres seront sélectionnés sur le critères de la combinaison qui donnera le plus faible RMSE associé.
+
+Voici un petit glossaire des paramètres chalengés:
+
+#### le Shinkage est l’équivalent du learning rate qui contrôle la descente de radient. Cette valeur est comprise entre 0 et 1 et est en général optimale vers 0,1.
+
+#### interaction.depth :Le nombre de feuille maximal accepté. Etant donné la théorie du boosting qui veut agréger des prédicteurs faibles, tous les arbres crées ne doivent pas être trop profond. N.B : un profondeur égale à 1 equivaut en principe à plus ou moins un GLM.
+
+#### optimal_trees : le nombre d’arbre permettant d’obtenir le meilleur résultat sur ce jeu de données. Il s’agit donc du nombre d’arbre optimal.
+
+#### RMSE: erreur quadratique moyenne que nous souhaitons minimiser ici. Il s'agit de la racine carrée du carré moyen des erreurs.
+
+#### n.minobsinnode : Le nombre minimal d'observation dans le dernier noeud de l'arbre.
+
+#### bag.fraction: part des observations du jeu d'entrâinement sélectionné aléatoirement. En temps normal, se paramètre est fixé à 0.5.
+
+Une fois ces paramètres obtenus nous les reincorporons dans notre algorithme d'entrainement et appliquons notre prédiction sur le jeu de test. Nous obtenons alors des probabilités prédite de Churn. Nous utlisons alors la fonction ifelse afin de fixer le seuil de probabilité auquel l'individus Churn ou non.
+Il sagit de l'algorithme qui nous donne les meilleurs résultats avec une AUC généralement supérieur à 0.8 est un nombre de churner particulièrement bien prédit. 
+
+# Conclusion 
+
+L'apprentissage supervisé semble plus efficace que le non supervisé. De même nous préfèrerons utiliser un gradient boosting pour déterminer nos clients Churners. 
+Nous avons pu voir que pour la représentation, il est plus parlant d'utiliser une classification, cependant la régression (comme dans le gradient boosting) pourrait nous permettre de mieux cibler nos churners. En effet, un service commercial pourrait par exemple nous demander de sortir un nombre précis de churners par mois, tout en limitant le nombre de faux pour ne pas passer d'appel inutile par exemple, dans ce cas la on fera varier notre probabilité seuil pour obtenir un nombre de churner avec très peu d'erreurs. Dans ce cas la, nous cherchons utilisons la DataScience comme vecteur de productivité
+
+```{r}
+"finish"
+```
+
